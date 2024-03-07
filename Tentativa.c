@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <mpi.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <omp.h>
 
 #define MAX_QUEUE 3
 #define CLOCK_SIZE 3
@@ -14,17 +16,8 @@ typedef struct Clock {
 typedef struct Task {
     int pid;
     Clock clock;
-} Task;
-
-typedef struct ThreadInputArgs {
-    int pid;
-    Clock* clock;
     int source;
-} ThreadInputArgs;
-
-typedef struct ThreadOutputArgs {
-    Task task;
-} ThreadOutputArgs;
+} Task;
 
 typedef struct Queue {
     Task t[MAX_QUEUE];
@@ -32,11 +25,6 @@ typedef struct Queue {
     pthread_mutex_t lock;
     pthread_cond_t notFull, notEmpty;
 } Queue;
-
-typedef struct ThreadProcessArgs {
-    Queue *input;
-    Queue *output;
-} ThreadProcessArgs;
 
 Queue input_queue;
 Queue output_queue;
@@ -78,168 +66,141 @@ void dequeue(Queue *q, Task *t) {
     pthread_mutex_unlock(&q->lock);
 }
 
-Clock Receive(int pid, Clock *clock, int source) {
+void ReceiveAndEnqueue(int pid, Clock *clock, int source) {
     Clock received;
-    MPI_Recv(&received, sizeof(Clock), MPI_BYTE, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Recv(&received, sizeof(Clock), MPI_INT, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    printf("Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, source, received.p[0], received.p[1], received.p[2]);
+    Task newTask = {pid, received, source};
+    enqueue(&input_queue, newTask);
+}
+
+void ProcessAndEnqueue(int pid, Clock *clock) {
+    Task currentTask;
+    dequeue(&input_queue, &currentTask);
     for (int i = 0; i < CLOCK_SIZE; i++) {
-        if (received.p[i] > clock->p[i]) {
-            clock->p[i] = received.p[i];
+        if (currentTask.clock.p[i] > clock->p[i]) {
+            clock->p[i] = currentTask.clock.p[i];
         }
     }
     clock->p[pid]++;
-    printf("Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, source, clock->p[0], clock->p[1], clock->p[2]);
-    return *clock;
+    printf("Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, currentTask.source, clock->p[0], clock->p[1], clock->p[2]);
+    Task nextTask = {pid, *clock, currentTask.source};
+    enqueue(&output_queue, nextTask);
 }
 
-void Send(int pid, Clock *clock, int dest) {
-    clock->p[pid]++;
-    MPI_Send(clock, sizeof(Clock), MPI_BYTE, dest, 0, MPI_COMM_WORLD);
-    printf("Processo %d enviou para o processo %d: Clock(%d, %d, %d)\n", pid, dest, clock->p[0], clock->p[1], clock->p[2]);
-}
-
-void create_input_task(int pid, Clock *clock) {
-    Task t;
-    t.pid = pid;
-    t.clock = *clock;
-    enqueue(&input_queue, t);
-}
-
-void create_output_task(int pid, Clock *clock) {
-    Task t;
-    t.pid = pid;
-    t.clock = *clock;
-    enqueue(&output_queue, t);
-}
-
-void *input_thread(void *arg) {
-    ThreadInputArgs *InputArgs = (ThreadInputArgs *)arg;
-    int pid = InputArgs->pid;
-    Clock *clock = InputArgs->clock;
-    int source = InputArgs->source;
-    sleep(1);
+void ProcessEvent(int pid, Clock *clock) {
     Event(pid, clock);
-    Send(pid, clock, 1); 
-    Clock received_clock = Receive(pid, clock, 1);
-    create_input_task(pid, &received_clock);
+    printf("Processo %d: Clock(%d, %d, %d)\n", pid, clock->p[0], clock->p[1], clock->p[2]);
+}
 
-    free(InputArgs);
+void createAndEnqueueTask(int pid, Clock *clock, int dest) {
+    Task newTask = {pid, *clock, dest};
+    enqueue(&output_queue, newTask);
+}
+
+void SendFromOutputQueue(int pid, Clock *clock, int dest) {
+    Task currentTask;
+    dequeue(&output_queue, &currentTask);
+    MPI_Send(&currentTask.clock, sizeof(Clock), MPI_BYTE, dest, 0 , MPI_COMM_WORLD);
+    printf("Processo %d enviou para o processo %d: Clock(%d, %d, %d)\n", pid, dest, currentTask.clock.p[0], currentTask.clock.p[1], currentTask.clock.p[2]);
+}
+
+void* input_thread(void* arg) {
+    int pid = *((int*)arg);
+    Clock clock = {0, 0, 0};
+    ReceiveAndEnqueue(pid, &clock, pid);
     return NULL;
 }
 
-void *process_thread(void *arg) {
-    ThreadProcessArgs *ProcessArgs = (ThreadProcessArgs*)arg;
-    Queue *input_queue = ProcessArgs->input;
-    Queue *output_queue = ProcessArgs->output;
-    Task t;
-    while (1) {
-        dequeue(input_queue, &t);
-        Event(t.pid, &t.clock);
-        printf("Processo %d executou: Clock(%d, %d, %d)\n", t.pid, t.clock.p[0], t.clock.p[1], t.clock.p[2]);
-        sleep(2);
-        create_output_task(t.pid, &t.clock);
-    }
+void* process_thread(void* arg) {
+    int pid = *((int*)arg);
+    Clock clock = {0, 0, 0};
+    ProcessAndEnqueue(pid, &clock);
     return NULL;
 }
 
-void *output_thread(void *arg) {
-    ThreadOutputArgs *OutputArgs = (ThreadOutputArgs *)arg;
-    Task t = OutputArgs->task;
-    sleep(2);
-    Send(t.pid, &t.clock, t.pid == 0 ? 1 : 0);
-    free(OutputArgs);
+void* output_thread(void* arg) {
+    int pid = *((int*)arg);
+    Clock clock = {0, 0, 0};
+    SendFromOutputQueue(pid, &clock, (pid + 1) % 3);
     return NULL;
 }
 
-void process0(int pid) {
-    Clock clock = {0, 0, 0};
-    initQueue(&input_queue);
-    initQueue(&output_queue);
 
-    ThreadInputArgs *InputArgs = malloc(sizeof(ThreadInputArgs));
-    InputArgs->pid = pid;
-    InputArgs->clock = &clock;
-    InputArgs->source = 1;
-
-    ThreadProcessArgs ProcessArgs;
-    ProcessArgs.input = &input_queue;
-    ProcessArgs.output = &output_queue;
-
-    pthread_t input, process, output;
-    pthread_create(&input, NULL, input_thread, InputArgs);
-    pthread_create(&process, NULL, process_thread, &ProcessArgs);
-    pthread_create(&output, NULL, output_thread, NULL);
-
-    pthread_join(input, NULL);
-    pthread_join(process, NULL);
-    pthread_join(output, NULL);
-
-    free(InputArgs);
+void process0(){
+    Clock clock = {{0, 0, 0}};
+    ProcessEvent(0, &clock);
+    printf("Processo: %d, Clock: (%d, %d, %d)\n", 0, clock.p[0], clock.p[1], clock.p[2]);
+    createAndEnqueueTask(0, &clock, 1);
+    SendFromOutputQueue(0, &clock, 1);
+    ReceiveAndEnqueue(0, &clock, 1);
+    ProcessAndEnqueue(0, &clock);
+    SendFromOutputQueue(0, &clock, 2);
+    ReceiveAndEnqueue(0, &clock, 2);
+    ProcessAndEnqueue(0, &clock);
+    SendFromOutputQueue(0, &clock, 1);
+    ProcessEvent(0, &clock);
+    printf("Processo %d, Clock troca com o processo 1: (%d, %d, %d)\n", 0, clock.p[0], clock.p[1], clock.p[2]);
 }
 
-void process1(int pid) {
-    Clock clock = {0, 0, 0};
-    initQueue(&input_queue);
-    initQueue(&output_queue);
-
-    ThreadInputArgs *InputArgs = malloc(sizeof(ThreadInputArgs));
-    InputArgs->pid = pid;
-    InputArgs->clock = &clock;
-    InputArgs->source = 0;
-
-    pthread_t input, process, output;
-    pthread_create(&input, NULL, input_thread, InputArgs);
-
-    ThreadProcessArgs ProcessArgs;
-    ProcessArgs.input = &input_queue;
-    ProcessArgs.output = &output_queue;
-    pthread_create(&process, NULL, process_thread, &ProcessArgs);
-    pthread_create(&output, NULL, output_thread, NULL);
-
-    pthread_join(input, NULL);
-    pthread_join(process, NULL);
-    pthread_join(output, NULL);
-
-    free(InputArgs);
+void process1(){
+    Clock clock = {{0, 0, 0}};
+    printf("Processo: %d, Clock: (%d, %d, %d)\n", 1, clock.p[0], clock.p[1], clock.p[2]);
+    createAndEnqueueTask(1, &clock, 0);
+    SendFromOutputQueue(1, &clock, 0);
+    ReceiveAndEnqueue(1, &clock, 0);
+    ProcessAndEnqueue(1, &clock);
+    ReceiveAndEnqueue(1, &clock, 0);
+    ProcessAndEnqueue(1, &clock);
 }
 
-void process2(int pid) {
-    Clock clock = {0, 0, 0};
-    initQueue(&input_queue);
-    initQueue(&output_queue);
-
-    ThreadInputArgs *InputArgs = malloc(sizeof(ThreadInputArgs));
-    InputArgs->pid = pid;
-    InputArgs->clock = &clock;
-    InputArgs->source = 0;
-
-    pthread_t input, process, output;
-    pthread_create(&input, NULL, input_thread, InputArgs);
-
-    ThreadProcessArgs ProcessArgs;
-    ProcessArgs.input = &input_queue;
-    ProcessArgs.output = &output_queue;
-    pthread_create(&process, NULL, process_thread, &ProcessArgs);
-    pthread_create(&output, NULL, output_thread, NULL);
-
-    pthread_join(input, NULL);
-    pthread_join(process, NULL);
-    pthread_join(output, NULL);
-
-    free(InputArgs);
+void process2(){
+    Clock clock = {{0, 0, 0}};
+    ProcessEvent(2, &clock);
+    printf("Processo: %d, Clock: (%d, %d, %d)\n", 2, clock.p[0], clock.p[1], clock.p[2]);
+    createAndEnqueueTask(2, &clock, 0);
+    SendFromOutputQueue(2, &clock, 0);
+    ReceiveAndEnqueue(2, &clock, 0);
+    ProcessAndEnqueue(2, &clock);
 }
 
-int main(void) {
-    int my_rank;
-    MPI_Init_thread(NULL, NULL, MPI_THREAD_SERIALIZED, NULL);
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+int main(int argc, char *argv[]) {
+    int provide; // Armazena o nível de suporte a threads do MPI
+    int rank;    // Identificador do processo
 
-    if (my_rank == 0) {
-        process0(my_rank);
-    } else if (my_rank == 1) {
-        process1(my_rank);
-    } else if (my_rank == 2) {
-        process2(my_rank);
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provide); // Inicializa o ambiente MPI
+    // Verifica se o ambiente MPI foi inicializado corretamente
+    if (provide != MPI_THREAD_MULTIPLE) {
+        printf("Error: MPI_THREAD_MULTIPLE não suportado\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    initQueue(&input_queue);
+    initQueue(&output_queue);
+
+    int arg1 = rank;
+    int arg2 = rank;
+    int arg3 = rank;
+
+    pthread_t input, process, output;
+    pthread_create(&input, NULL, input_thread, &arg1);
+    pthread_create(&process, NULL, process_thread, &arg2);
+    pthread_create(&output, NULL, output_thread, &arg3);
+
+    if(rank == 0) {
+        process0();
+    } else if(rank == 1) {
+        process1();
+    } else if(rank == 2) {
+        process2();
+    }
+
+    pthread_join(input, NULL);
+    pthread_join(process, NULL);
+    pthread_join(output, NULL);
+
+    MPI_Finalize();
     return 0;
 }
