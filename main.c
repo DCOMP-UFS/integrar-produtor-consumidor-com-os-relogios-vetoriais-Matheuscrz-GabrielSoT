@@ -9,16 +9,28 @@
 #define MAX_QUEUE 3
 #define CLOCK_SIZE 3
 
+/**
+ * @brief Estrutura que representa um relógio vetorial
+ * 
+ */
 typedef struct Clock {
     int p[CLOCK_SIZE];
 } Clock;
 
+/**
+ * @brief Estrutura que representa uma tarefa
+ * 
+ */
 typedef struct Task {
     int pid;
     Clock clock;
     int source;
 } Task;
 
+/**
+ * @brief Estrutura que representa uma fila de tarefas
+ * 
+ */
 typedef struct Queue {
     Task t[MAX_QUEUE];
     int front, rear, size;
@@ -29,6 +41,11 @@ typedef struct Queue {
 Queue input_queue;
 Queue output_queue;
 
+/**
+ * @brief Método que inicializa uma fila
+ * 
+ * @param q - Ponteiro para a fila
+ */
 void initQueue(Queue *q) {
     q->front = 0;
     q->rear = 0;
@@ -38,10 +55,22 @@ void initQueue(Queue *q) {
     pthread_cond_init(&q->notEmpty, NULL);
 }
 
+/**
+ * @brief - Método que incrementa o relógio vetorial
+ * 
+ * @param pid - Identificador do processo
+ * @param clock - Ponteiro para o relógio vetorial
+ */
 void Event(int pid, Clock *clock) {
     clock->p[pid]++;
 }
 
+/**
+ * @brief Método que insere uma tarefa na fila
+ * 
+ * @param q - Ponteiro para a fila
+ * @param t - Tarefa a ser inserida
+ */
 void enqueue(Queue *q, Task t) {
     pthread_mutex_lock(&q->lock);
     while (q->size == MAX_QUEUE) {
@@ -54,6 +83,12 @@ void enqueue(Queue *q, Task t) {
     pthread_mutex_unlock(&q->lock);
 }
 
+/**
+ * @brief Método que remove uma tarefa da fila
+ * 
+ * @param q - Ponteiro para a fila
+ * @param t - Ponteiro para a tarefa a ser removida
+ */
 void dequeue(Queue *q, Task *t) {
     pthread_mutex_lock(&q->lock);
     while (q->size == 0) {
@@ -66,6 +101,13 @@ void dequeue(Queue *q, Task *t) {
     pthread_mutex_unlock(&q->lock);
 }
 
+/**
+ * @brief - Método que recebe uma mensagem e insere na fila
+ * 
+ * @param pid - Identificador do processo
+ * @param clock - Ponteiro para o relógio vetorial
+ * @param source - Identificador do processo que enviou a mensagem
+ */
 void ReceiveAndEnqueue(int pid, Clock *clock, int source) {
     Clock received;
     MPI_Recv(&received, sizeof(Clock), MPI_INT, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -74,6 +116,12 @@ void ReceiveAndEnqueue(int pid, Clock *clock, int source) {
     enqueue(&input_queue, newTask);
 }
 
+/**
+ * @brief - Método que processa uma mensagem e insere na fila
+ * 
+ * @param pid - Identificador do processo
+ * @param clock - Ponteiro para o relógio vetorial
+ */
 void ProcessAndEnqueue(int pid, Clock *clock) {
     Task currentTask;
     dequeue(&input_queue, &currentTask);
@@ -88,16 +136,36 @@ void ProcessAndEnqueue(int pid, Clock *clock) {
     enqueue(&output_queue, nextTask);
 }
 
+/**
+ * @brief - Método que incrementa o relógio vetorial e imprime o valor
+ * 
+ * @param pid - Identificador do processo
+ * @param clock - Ponteiro para o relógio vetorial
+ */
 void ProcessEvent(int pid, Clock *clock) {
     Event(pid, clock);
     printf("Processo %d: Clock(%d, %d, %d)\n", pid, clock->p[0], clock->p[1], clock->p[2]);
 }
 
+/**
+ * @brief Método que cria uma tarefa e insere na fila
+ * 
+ * @param pid - Identificador do processo
+ * @param clock - Ponteiro para o relógio vetorial
+ * @param dest - Identificador do processo de destino
+ */
 void createAndEnqueueTask(int pid, Clock *clock, int dest) {
     Task newTask = {pid, *clock, dest};
     enqueue(&output_queue, newTask);
 }
 
+/**
+ * @brief Método que envia uma mensagem para outro processo
+ * 
+ * @param pid - Identificador do processo
+ * @param clock - Ponteiro para o relógio vetorial
+ * @param dest - Identificador do processo de destino
+ */
 void SendFromOutputQueue(int pid, Clock *clock, int dest) {
     Task currentTask;
     dequeue(&output_queue, &currentTask);
@@ -105,6 +173,12 @@ void SendFromOutputQueue(int pid, Clock *clock, int dest) {
     printf("Processo %d enviou para o processo %d: Clock(%d, %d, %d)\n", pid, dest, currentTask.clock.p[0], currentTask.clock.p[1], currentTask.clock.p[2]);
 }
 
+/**
+ * @brief Método que usa uma thread para receber mensagens
+ * 
+ * @param arg - Identificador do processo
+ * @return void* 
+ */
 void* input_thread(void* arg) {
     int pid = *((int*)arg);
     Clock clock = {0, 0, 0};
@@ -112,6 +186,12 @@ void* input_thread(void* arg) {
     return NULL;
 }
 
+/**
+ * @brief Método que usa uma thread para processar mensagens
+ * 
+ * @param arg - Identificador do processo
+ * @return void* 
+ */
 void* process_thread(void* arg) {
     int pid = *((int*)arg);
     Clock clock = {0, 0, 0};
@@ -119,6 +199,12 @@ void* process_thread(void* arg) {
     return NULL;
 }
 
+/**
+ * @brief Método que usa uma thread para enviar mensagens
+ * 
+ * @param arg - Identificador do processo
+ * @return void* 
+ */
 void* output_thread(void* arg) {
     int pid = *((int*)arg);
     Clock clock = {0, 0, 0};
@@ -126,7 +212,10 @@ void* output_thread(void* arg) {
     return NULL;
 }
 
-
+/**
+ * @brief Método que simula o comportamento do processo 0
+ * 
+ */
 void process0(){
     Clock clock = {{0, 0, 0}};
     ProcessEvent(0, &clock);
@@ -143,6 +232,10 @@ void process0(){
     printf("Processo %d, Clock troca com o processo 1: (%d, %d, %d)\n", 0, clock.p[0], clock.p[1], clock.p[2]);
 }
 
+/**
+ * @brief Método que simula o comportamento do processo 1
+ * 
+ */
 void process1(){
     Clock clock = {{0, 0, 0}};
     printf("Processo: %d, Clock: (%d, %d, %d)\n", 1, clock.p[0], clock.p[1], clock.p[2]);
@@ -154,6 +247,10 @@ void process1(){
     ProcessAndEnqueue(1, &clock);
 }
 
+/**
+ * @brief Método que simula o comportamento do processo 2
+ * 
+ */
 void process2(){
     Clock clock = {{0, 0, 0}};
     ProcessEvent(2, &clock);
@@ -164,6 +261,13 @@ void process2(){
     ProcessAndEnqueue(2, &clock);
 }
 
+/**
+ * @brief Método principal
+ * 
+ * @param argc - Número de argumentos
+ * @param argv - Vetor de argumentos
+ * @return int 
+ */
 int main(int argc, char *argv[]) {
     int provide; // Armazena o nível de suporte a threads do MPI
     int rank;    // Identificador do processo
