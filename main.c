@@ -1,230 +1,206 @@
 #include <stdio.h>
-#include <mpi.h>
 #include <stdlib.h>
+#include <string.h>
+#include <mpi.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <omp.h>
 
-#define MAX_QUEUE 10
-#define NUM_THREADS 3
+#define MAX_QUEUE 3
+#define CLOCK_SIZE 3
 
-/**
- * @brief - Estrutura que representa o relógio vetorial.
- * 
- */
 typedef struct Clock {
-    int p[3];
+    int p[CLOCK_SIZE];
 } Clock;
 
-/**
- * @brief - Estrutura que representa uma Task.
- * 
- */
 typedef struct Task {
     int pid;
     Clock clock;
+    int source;
 } Task;
 
-/**
- * @brief - Estrutura que representa uma fila.
- * 
- */
 typedef struct Queue {
     Task t[MAX_QUEUE];
     int front, rear, size;
     pthread_mutex_t lock;
-    pthread_cond_t can_produce, can_consume;
+    pthread_cond_t notFull, notEmpty;
 } Queue;
 
-pthread_mutex_t mutex_input_queue = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cond_input_queue = PTHREAD_COND_INITIALIZER;
-pthread_mutex_t mutex_output_queue = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cond_output_queue = PTHREAD_COND_INITIALIZER;
+Queue input_queue;
+Queue output_queue;
 
-/**
- * @brief - Inicializa a fila.
- * 
- * @param pid - Identificador do processo.
- * @param clock - Relógio vetorial.
- */
-void ClockIncrement(int pid, Clock *clock) {
+void initQueue(Queue *q) {
+    q->front = 0;
+    q->rear = 0;
+    q->size = 0;
+    pthread_mutex_init(&q->lock, NULL);
+    pthread_cond_init(&q->notFull, NULL);
+    pthread_cond_init(&q->notEmpty, NULL);
+}
+
+void Event(int pid, Clock *clock) {
     clock->p[pid]++;
 }
 
-/**
- * @brief - Inicializa a fila.
- * 
- * @param item - Item a ser enfileirado.
- * @param q - Fila.
- */
-void Input_Enqueue(Task item, Queue *q) {
+void enqueue(Queue *q, Task t) {
     pthread_mutex_lock(&q->lock);
-    input_queue[0] = item;
+    while (q->size == MAX_QUEUE) {
+        pthread_cond_wait(&q->notFull, &q->lock);
+    }
+    q->t[q->rear] = t;
+    q->rear = (q->rear + 1) % MAX_QUEUE;
+    q->size++;
+    pthread_cond_signal(&q->notEmpty);
     pthread_mutex_unlock(&q->lock);
 }
 
-/**
- * @brief - Remove um item da fila.
- * 
- * @param item - Item a ser desenfileirado.
- * @param q - Fila.
- */
-void Input_Dequeue(Task *item, Queue *q){
+void dequeue(Queue *q, Task *t) {
     pthread_mutex_lock(&q->lock);
-    *item = input_queue[0];
+    while (q->size == 0) {
+        pthread_cond_wait(&q->notEmpty, &q->lock);
+    }
+    *t = q->t[q->front];
+    q->front = (q->front + 1) % MAX_QUEUE;
+    q->size--;
+    pthread_cond_signal(&q->notFull);
     pthread_mutex_unlock(&q->lock);
 }
 
-/**
- * @brief - Adiciona um item à fila de saída.
- * 
- * @param item - Item a ser enfileirado.
- * @param q - Fila.
- */
-void Output_Enqueue(Task item, Queue *q){
-    pthread_mutex_lock(&q->lock);
-    output_queue[0] = item;
-    pthread_mutex_unlock(&q->lock);
+void ReceiveAndEnqueue(int pid, Clock *clock, int source) {
+    Clock received;
+    MPI_Recv(&received, sizeof(Clock), MPI_INT, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    printf("Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, source, received.p[0], received.p[1], received.p[2]);
+    Task newTask = {pid, received, source};
+    enqueue(&input_queue, newTask);
 }
 
-/**
- * @brief - Remove um item da fila de saída.
- * 
- * @param item - Item a ser desenfileirado.
- * @param q - Fila.
- */
-void Output_Dequeue(Task *item, Queue *q){
-    pthread_mutex_lock(&q->lock);
-    *item = output_queue[0];
-    pthread_mutex_unlock(&q->lock);
-}
-
-/**
- * @brief - Função que incrementa o relógio vetorial.
- * 
- * @param input_queue - Fila de entrada.
- * @param output_queue - Fila de saída.
- * @return void* 
- */
-void *process_thread(Queue *input_queue, Queue *output_queue){
-    Task task_aux = input_queue[0]; // Cria uma cópia da tarefa
-    Input_Dequeue(&task_aux, *input_queue); // Remove a tarefa da fila de entrada
-    for (int i = 0; i < 3; i++) {
-        if (task_aux.clock.p[i] > local_clock.p[i]) {
-            local_clock.p[i] = task_aux.clock.p[i];
+void ProcessAndEnqueue(int pid, Clock *clock) {
+    Task currentTask;
+    dequeue(&input_queue, &currentTask);
+    for (int i = 0; i < CLOCK_SIZE; i++) {
+        if (currentTask.clock.p[i] > clock->p[i]) {
+            clock->p[i] = currentTask.clock.p[i];
         }
     }
-    ClockIncrement(task_aux.pid, &local_clock); // Incrementa o relógio
-    Output_Enqueue(task_aux, *output_queue); // Adiciona a tarefa à fila de saída
+    clock->p[pid]++;
+    printf("Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, currentTask.source, clock->p[0], clock->p[1], clock->p[2]);
+    Task nextTask = {pid, *clock, currentTask.source};
+    enqueue(&output_queue, nextTask);
 }
 
-/**
- * @brief - Função que recebe uma tarefa.
- * 
- * @param task - Tarefa a ser processada.
- * @param source - Processo de origem.
- * @return void* 
- */
-void *receive_thread(Task *task, int source){
-    Task task_aux = *task // Cria uma tarefa auxiliar
-    MPI_Recv(&task_aux, sizeof(Task), MPI_BYTE, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE); // Recebe a tarefa
-    Input_Enqueue(task_aux, *input_queue); // Adiciona a tarefa à fila de entrada
-    pthread_exit(NULL);
+void ProcessEvent(int pid, Clock *clock) {
+    Event(pid, clock);
+    printf("Processo %d: Clock(%d, %d, %d)\n", pid, clock->p[0], clock->p[1], clock->p[2]);
 }
-/**
- * @brief - Função que envia uma tarefa.
- * 
- * @param task - Tarefa a ser processada.
- * @param dest - Processo de destino.
- * @return void* 
- */
-void *send_thread(Task *task, int dest){
-    Task task_aux = *task; // Cria uma cópia da tarefa
-    Output_Dequeue(&task_aux, *output_queue); // Remove a tarefa da fila de saída
-    MPI_Send(&task_aux, sizeof(Task), MPI_BYTE, dest, 0, MPI_COMM_WORLD); // Envia a tarefa
-    pthread_exit(NULL);
+
+void createAndEnqueueTask(int pid, Clock *clock, int dest) {
+    Task newTask = {pid, *clock, dest};
+    enqueue(&output_queue, newTask);
 }
+
+void SendFromOutputQueue(int pid, Clock *clock, int dest) {
+    Task currentTask;
+    dequeue(&output_queue, &currentTask);
+    MPI_Send(&currentTask.clock, sizeof(Clock), MPI_BYTE, dest, 0 , MPI_COMM_WORLD);
+    printf("Processo %d enviou para o processo %d: Clock(%d, %d, %d)\n", pid, dest, currentTask.clock.p[0], currentTask.clock.p[1], currentTask.clock.p[2]);
+}
+
+void* input_thread(void* arg) {
+    int pid = *((int*)arg);
+    Clock clock = {0, 0, 0};
+    ReceiveAndEnqueue(pid, &clock, pid);
+    return NULL;
+}
+
+void* process_thread(void* arg) {
+    int pid = *((int*)arg);
+    Clock clock = {0, 0, 0};
+    ProcessAndEnqueue(pid, &clock);
+    return NULL;
+}
+
+void* output_thread(void* arg) {
+    int pid = *((int*)arg);
+    Clock clock = {0, 0, 0};
+    SendFromOutputQueue(pid, &clock, (pid + 1) % 3);
+    return NULL;
+}
+
 
 void process0(){
-    Clock local_clock = {0, 0, 0}; // Inicializa o relógio vetorial
-    Queue input_queue, output_queue; // Inicializa as filas
-    ClockIncrement(0, &local_clock); // Incrementa o relógio
-    printf("Process 0: %d %d %d\n", local_clock.p[0], local_clock.p[1], local_clock.p[2]);
-    Task task = {0, local_clock}; // Inicializa a tarefa
-    pthread_t thread1, thread2, thread3;
-    pthread_create(&thread1, NULL, process_thread, &input_queue);
-    pthread_create(&thread2, NULL, send_thread, &task);
-    pthread_create(&thread3, NULL, receive_thread, NULL);
-    pthread_join(thread1, NULL);
-    pthread_join(thread2, NULL);
-    pthread_join(thread3, NULL);
-    send_thread(task, 1); // Envia a tarefa
-    receive_thread(task, 1); // Recebe a tarefa
-    Input_Enqueue(task, input_queue); // Adiciona a tarefa à fila de entrada
-    process_thread(input_queue, output_queue); // Processa a tarefa
-    send_thread(task, 2); // Envia a tarefa
-    receive_thread(task, 2); // Recebe a tarefa
-    Input_Enqueue(task, input_queue); // Adiciona a tarefa à fila de entrada
-    process_thread(input_queue, output_queue); // Processa a tarefa
-    send_thread(task, 1); // Envia a tarefa
-    ClockIncrement(0, &local_clock); // Incrementa o relógio
-    printf("Process 0: %d %d %d\n", local_clock.p[0], local_clock.p[1], local_clock.p[2]);
+    Clock clock = {{0, 0, 0}};
+    ProcessEvent(0, &clock);
+    printf("Processo: %d, Clock: (%d, %d, %d)\n", 0, clock.p[0], clock.p[1], clock.p[2]);
+    createAndEnqueueTask(0, &clock, 1);
+    SendFromOutputQueue(0, &clock, 1);
+    ReceiveAndEnqueue(0, &clock, 1);
+    ProcessAndEnqueue(0, &clock);
+    SendFromOutputQueue(0, &clock, 2);
+    ReceiveAndEnqueue(0, &clock, 2);
+    ProcessAndEnqueue(0, &clock);
+    SendFromOutputQueue(0, &clock, 1);
+    ProcessEvent(0, &clock);
+    printf("Processo %d, Clock troca com o processo 1: (%d, %d, %d)\n", 0, clock.p[0], clock.p[1], clock.p[2]);
 }
 
-
 void process1(){
-    Clock local_clock = {0, 0, 0}; // Inicializa o relógio vetorial
-    Queue input_queue, output_queue; // Inicializa as filas
-    Task task = {1, local_clock}; // Inicializa a tarefa
-    pthread_t thread1, thread2, thread3;
-    pthread_create(&thread1, NULL, process_thread, &input_queue);
-    pthread_create(&thread2, NULL, send_thread, &task);
-    pthread_create(&thread3, NULL, receive_thread, NULL);
-    pthread_join(thread1, NULL);
-    pthread_join(thread2, NULL);
-    pthread_join(thread3, NULL);
-    printf("Process 1: %d %d %d\n", local_clock.p[0], local_clock.p[1], local_clock.p[2]);
-    send_thread(task, 0); // Envia a tarefa
-    receive_thread(task, 0); // Recebe a tarefa
-    Input_Enqueue(task, input_queue); // Adiciona a tarefa à fila de entrada
-    process_thread(input_queue, output_queue); // Processa a tarefa
-    receive_thread(task, 2); // Recebe a tarefa
-    Input_Enqueue(task, input_queue); // Adiciona a tarefa à fila de entrada
-    process_thread(input_queue, output_queue); // Processa a tarefa
+    Clock clock = {{0, 0, 0}};
+    printf("Processo: %d, Clock: (%d, %d, %d)\n", 1, clock.p[0], clock.p[1], clock.p[2]);
+    createAndEnqueueTask(1, &clock, 0);
+    SendFromOutputQueue(1, &clock, 0);
+    ReceiveAndEnqueue(1, &clock, 0);
+    ProcessAndEnqueue(1, &clock);
+    ReceiveAndEnqueue(1, &clock, 0);
+    ProcessAndEnqueue(1, &clock);
 }
 
 void process2(){
-    Clock local_clock = {0, 0, 0}; // Inicializa o relógio vetorial
-    Queue input_queue, output_queue; // Inicializa as filas
-    Task task = {2, local_clock}; // Inicializa a tarefa
-    pthread_t thread1, thread2, thread3;
-    pthread_create(&thread1, NULL, process_thread, &input_queue);
-    pthread_create(&thread2, NULL, send_thread, &task);
-    pthread_create(&thread3, NULL, receive_thread, NULL);
-    pthread_join(thread1, NULL);
-    pthread_join(thread2, NULL);
-    pthread_join(thread3, NULL);
-    printf("Process 2: %d %d %d\n", local_clock.p[0], local_clock.p[1], local_clock.p[2]);
-    ClockIncrement(2, &local_clock); // Incrementa o relógio
-    printf("Process 2: %d %d %d\n", local_clock.p[0], local_clock.p[1], local_clock.p[2]);
-    send_thread(task, 0); // Envia a tarefa
-    receive_thread(task, 0); // Recebe a tarefa
-    Input_Enqueue(task, input_queue); // Adiciona a tarefa à fila de entrada
-    process_thread(input_queue, output_queue); // Processa a tarefa
+    Clock clock = {{0, 0, 0}};
+    ProcessEvent(2, &clock);
+    printf("Processo: %d, Clock: (%d, %d, %d)\n", 2, clock.p[0], clock.p[1], clock.p[2]);
+    createAndEnqueueTask(2, &clock, 0);
+    SendFromOutputQueue(2, &clock, 0);
+    ReceiveAndEnqueue(2, &clock, 0);
+    ProcessAndEnqueue(2, &clock);
 }
 
-int main(void){
-    int my_rank;
-    MPI_Init(NULL, NULL);
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+int main(int argc, char *argv[]) {
+    int provide; // Armazena o nível de suporte a threads do MPI
+    int rank;    // Identificador do processo
 
-    if (my_rank == 0){
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provide); // Inicializa o ambiente MPI
+    // Verifica se o ambiente MPI foi inicializado corretamente
+    if (provide != MPI_THREAD_MULTIPLE) {
+        printf("Error: MPI_THREAD_MULTIPLE não suportado\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    initQueue(&input_queue);
+    initQueue(&output_queue);
+
+    int arg1 = rank;
+    int arg2 = rank;
+    int arg3 = rank;
+
+    pthread_t input, process, output;
+    pthread_create(&input, NULL, input_thread, &arg1);
+    pthread_create(&process, NULL, process_thread, &arg2);
+    pthread_create(&output, NULL, output_thread, &arg3);
+
+    if(rank == 0) {
         process0();
-    } else if (my_rank == 1){
+    } else if(rank == 1) {
         process1();
-    } else if (my_rank == 2){
+    } else if(rank == 2) {
         process2();
     }
-    MPI_Finalize();
 
+    pthread_join(input, NULL);
+    pthread_join(process, NULL);
+    pthread_join(output, NULL);
+
+    MPI_Finalize();
     return 0;
 }
