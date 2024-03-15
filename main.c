@@ -48,42 +48,34 @@ void initQueue(Queue *q) {
 
 void enqueue(Queue *q, QueueItem item) {
     pthread_mutex_lock(&q->lock);
-    printf("Enqueue: Lock adquirido\n");
     while (q->size == MAX_QUEUE) {
-        printf("Enqueue: Fila cheia, aguardando não cheia...\n");
         pthread_cond_wait(&q->notFull, &q->lock);
     }
-    printf("Enqueue: Espaço disponível na fila, inserindo item...\n");
     q->items[q->rear] = item;
     q->rear = (q->rear + 1) % MAX_QUEUE;
     q->size++;
     pthread_cond_signal(&q->notEmpty);
     pthread_mutex_unlock(&q->lock);
-    printf("Enqueue: Lock liberado\n");
 }
 
 QueueItem dequeue(Queue *q) {
     pthread_mutex_lock(&q->lock);
-    printf("Dequeue: Lock adquirido\n");
     while (q->size == 0) {
-        printf("Dequeue: Fila vazia, aguardando não vazia...\n");
         pthread_cond_wait(&q->notEmpty, &q->lock);
     }
-    printf("Dequeue: Item disponível na fila, removendo item...\n");
     QueueItem item = q->items[q->front];
     q->front = (q->front + 1) % MAX_QUEUE;
     q->size--;
     pthread_cond_signal(&q->notFull);
     pthread_mutex_unlock(&q->lock);
-    printf("Dequeue: Lock liberado\n");
     return item;
 }
 
 char* Increment(int pid, Clock *clock) {
     clock->p[pid]++;
-    char* message = malloc(MESSAGE_SIZE * sizeof(char)); // Aloca memória para a mensagem
-    sprintf(message, "Processo %d: Clock(%d, %d, %d)\n", pid, clock->p[0], clock->p[1], clock->p[2]); // Cria um ponteiro para a mensagem
-    return message; // Retorna um ponteiro para a mensagem
+    char* message = malloc(MESSAGE_SIZE * sizeof(char));
+    sprintf(message, "Processo %d: Clock(%d, %d, %d)\n", pid, clock->p[0], clock->p[1], clock->p[2]);
+    return message;
 }
 
 void updateClock(Clock *clock, Clock *received) {
@@ -101,9 +93,9 @@ char* Send_MPI(int pid, Clock *clock, int dest){
         fprintf(stderr, "Falha ao enviar mensagem MPI\n");
         MPI_Abort(MPI_COMM_WORLD, error);
     }
-    char* message = malloc(MESSAGE_SIZE * sizeof(char)); // Aloca memória para a mensagem
-    sprintf(message, "Processo %d enviou para o processo %d: Clock(%d, %d, %d)\n", pid, dest, clock->p[0], clock->p[1], clock->p[2]); // Cria um ponteiro para a mensagem
-    return message; // Retorna um ponteiro para a mensagem
+    char* message = malloc(MESSAGE_SIZE * sizeof(char));
+    sprintf(message, "Processo %d enviou para o processo %d: Clock(%d, %d, %d)\n", pid, dest, clock->p[0], clock->p[1], clock->p[2]);
+    return message;
 }
 
 char* Recv_MPI(int pid, Clock *clock, int source){
@@ -114,9 +106,9 @@ char* Recv_MPI(int pid, Clock *clock, int source){
         MPI_Abort(MPI_COMM_WORLD, error);
     }
     updateClock(clock, &received);
-    char* message = malloc(MESSAGE_SIZE * sizeof(char)); // Aloca memória para a mensagem
-    sprintf(message, "Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, source, received.p[0], received.p[1], received.p[2]); // Cria um ponteiro para a mensagem
-    return message; // Retorna um ponteiro para a mensagem
+    char* message = malloc(MESSAGE_SIZE * sizeof(char));
+    sprintf(message, "Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, source, received.p[0], received.p[1], received.p[2]);
+    return message;
 }
 
 void* processThread(void *arg) {
@@ -125,15 +117,17 @@ void* processThread(void *arg) {
         QueueItem item = dequeue(&input_queue);
         if(item.type == EVENT){
             char* message = Increment(item.pid, &clock);
-            strcpy(item.message, message); // Copia a mensagem para o item
+            strcpy(item.message, message);
+            free(message);
         } else if(item.type == SEND){
             char* message = Send_MPI(item.pid, &clock, item.target);
-            strcpy(item.message, message); // Copia a mensagem para o item
+            strcpy(item.message, message);
+            free(message);
         } else if(item.type == RECEIVE){
-            char* message = Recv_MPI(item.pid, &clock, item.target); // Cria um ponteiro para a mensagem 
-            strcpy(item.message, message); // Copia a mensagem para o item
+            char* message = Recv_MPI(item.pid, &clock, item.target);
+            strcpy(item.message, message);
+            free(message);
         }
-        printf("Output - Fila");
         enqueue(&output_queue, item);
         if (input_queue.size == 0 && item.type != EVENT) {
             break;
@@ -142,20 +136,11 @@ void* processThread(void *arg) {
     return NULL;
 }
 
-void* inputThread(void *arg) {
-    QueueItem *item = (QueueItem*)arg;
-    printf("Input - Fila");
-    enqueue(&input_queue, *item); // Adiciona o item na fila de entrada
-    free(item); // Libera a memória alocada
-    return NULL;
-}
-
 void* outputThread(void *arg) {
     while(1) {
         QueueItem item = dequeue(&output_queue);
         if(item.message != NULL){
             printf("%s", item.message);
-            // free(item.message);
         } else {
             break;
         }
@@ -165,34 +150,28 @@ void* outputThread(void *arg) {
 
 void Event(int pid){
     MessageType type = EVENT;
-    QueueItem *item = malloc(sizeof(QueueItem));
-    item->pid = pid;
-    item->type = type;
-    pthread_t thread;
-    pthread_create(&thread, NULL, inputThread, item);
-    pthread_join(thread, NULL);
+    QueueItem item;
+    item.pid = pid;
+    item.type = type;
+    enqueue(&input_queue, item);
 }
 
 void Send(int pid, int dest){
     MessageType type = SEND;
-    QueueItem *item = malloc(sizeof(QueueItem));
-    item->pid = pid;
-    item->type = type;
-    item->target = dest;
-    pthread_t thread;
-    pthread_create(&thread, NULL, inputThread, item);
-    pthread_join(thread, NULL);
+    QueueItem item;
+    item.pid = pid;
+    item.type = type;
+    item.target = dest;
+    enqueue(&input_queue, item);
 }
 
 void Receive(int pid, int source){
     MessageType type = RECEIVE;
-    QueueItem *item = malloc(sizeof(QueueItem));
-    item->pid = pid;
-    item->type = type;
-    item->target = source;
-    pthread_t thread;
-    pthread_create(&thread, NULL, inputThread, item);
-    pthread_join(thread, NULL);
+    QueueItem item;
+    item.pid = pid;
+    item.type = type;
+    item.target = source;
+    enqueue(&input_queue, item);
 }
 
 void process0(){
@@ -205,13 +184,13 @@ void process0(){
     Event(0);
 }
 
-void process1(){ 
+void process1(){
     Send(1, 0);
     Receive(1, 0);
     Receive(1, 0);
 }
 
-void process2(){ 
+void process2(){
     Event(2);
     Send(2, 0);
     Receive(2, 0);
