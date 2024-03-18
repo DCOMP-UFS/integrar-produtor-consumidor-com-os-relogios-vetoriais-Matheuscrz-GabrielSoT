@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
 #include <mpi.h>
 
 #define MAX_QUEUE_SIZE 100
@@ -9,16 +10,90 @@ typedef struct Clock {
     int p[3]; // Array de inteiros para os relógios dos processos
 } Clock;
 
-// Estrutura para representar a fila FIFO de relógios recebidos
+// Estrutura para representar um buffer de produtor/consumidor
 typedef struct {
     Clock data[MAX_QUEUE_SIZE]; // Array para armazenar os relógios
     int front, rear; // Índices de frente e trás da fila
+    pthread_mutex_t mutex; // Mutex para controle de acesso ao buffer
+    pthread_cond_t empty, full; // Variáveis de condição para sincronização
 } ClockQueue;
 
 // Protótipos das funções
 void enqueue(ClockQueue *queue, Clock *clock);
-int isEmpty(ClockQueue *queue);
 Clock dequeue(ClockQueue *queue);
+
+// Função para inicializar a fila
+void initQueue(ClockQueue *queue) {
+    queue->front = -1;
+    queue->rear = -1;
+    pthread_mutex_init(&queue->mutex, NULL);
+    pthread_cond_init(&queue->empty, NULL);
+    pthread_cond_init(&queue->full, NULL);
+}
+
+// Função para verificar se a fila está vazia
+int isEmpty(ClockQueue *queue) {
+    return (queue->front == -1 && queue->rear == -1);
+}
+
+// Função para verificar se a fila está cheia
+int isFull(ClockQueue *queue) {
+    return ((queue->rear + 1) % MAX_QUEUE_SIZE == queue->front);
+}
+
+// Função para adicionar um relógio à fila
+void enqueue(ClockQueue *queue, Clock *clock) {
+    pthread_mutex_lock(&queue->mutex); // Bloqueia o acesso ao buffer com o mutex
+
+    // Aguarda até que haja espaço disponível no buffer
+    while (isFull(queue)) {
+        pthread_cond_wait(&queue->full, &queue->mutex);
+    }
+
+    // Insere o relógio no buffer
+    if (isEmpty(queue)) {
+        queue->front = 0;
+        queue->rear = 0;
+    } else {
+        queue->rear = (queue->rear + 1) % MAX_QUEUE_SIZE;
+    }
+    queue->data[queue->rear] = *clock;
+
+    // Sinaliza que o buffer não está mais vazio e está cheio
+    pthread_cond_signal(&queue->empty);
+    pthread_cond_signal(&queue->full);
+
+    pthread_mutex_unlock(&queue->mutex); // Libera o acesso ao buffer
+}
+
+// Função para remover um relógio da fila
+Clock dequeue(ClockQueue *queue) {
+    pthread_mutex_lock(&queue->mutex); // Bloqueia o acesso ao buffer com o mutex
+
+    // Aguarda até que haja um item disponível no buffer
+    while (isEmpty(queue)) {
+        pthread_cond_wait(&queue->empty, &queue->mutex);
+    }
+
+    // Remove o relógio do buffer
+    Clock emptyClock = {{0, 0, 0}};
+    if (queue->front == queue->rear) {
+        Clock item = queue->data[queue->front];
+        queue->front = -1;
+        queue->rear = -1;
+        pthread_cond_signal(&queue->full); // Sinaliza que o buffer não está mais cheio
+        pthread_mutex_unlock(&queue->mutex); // Libera o acesso ao buffer
+        return item;
+    } else {
+        Clock item = queue->data[queue->front];
+        queue->front = (queue->front + 1) % MAX_QUEUE_SIZE;
+
+        // Sinaliza que o buffer não está mais cheio
+        pthread_cond_signal(&queue->full);
+        pthread_mutex_unlock(&queue->mutex); // Libera o acesso ao buffer
+        return item;
+    }
+}
 
 // Função para incrementar o relógio de um processo após um evento
 void Event(int pid, Clock *clock){
@@ -32,6 +107,7 @@ void Send(int pid, Clock *clock, int dest, ClockQueue *queue){
     // Se uma fila for fornecida, adiciona o relógio à fila
     if (queue != NULL) {
         enqueue(queue, clock);
+        printf("Processo %d: Enviou para a fila de saída. Itens na fila de saída: %d\n", pid, (queue->rear - queue->front + MAX_QUEUE_SIZE) % MAX_QUEUE_SIZE + 1);
     }
 
     // Envia o relógio para o processo destino usando MPI_Send
@@ -44,6 +120,7 @@ void Receive(int pid, Clock *clock, int source, ClockQueue *queue){
     // Se uma fila for fornecida e não estiver vazia, retira um relógio da fila
     if (queue != NULL && !isEmpty(queue)) {
         *clock = dequeue(queue);
+        printf("Processo %d: Recebeu da fila de entrada. Itens na fila de entrada: %d\n", pid, (queue->rear - queue->front + MAX_QUEUE_SIZE) % MAX_QUEUE_SIZE);
     }
 
     // Recebe o novo relógio do processo origem usando MPI_Recv
@@ -61,54 +138,6 @@ void Receive(int pid, Clock *clock, int source, ClockQueue *queue){
     clock->p[pid]++;
 
     printf("Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, source, clock->p[0], clock->p[1], clock->p[2]);
-}
-
-// Função para inicializar a fila
-void initQueue(ClockQueue *queue) {
-    queue->front = -1;
-    queue->rear = -1;
-}
-
-// Função para verificar se a fila está vazia
-int isEmpty(ClockQueue *queue) {
-    return (queue->front == -1 && queue->rear == -1);
-}
-
-// Função para verificar se a fila está cheia
-int isFull(ClockQueue *queue) {
-    return ((queue->rear + 1) % MAX_QUEUE_SIZE == queue->front);
-}
-
-// Função para adicionar um relógio à fila
-void enqueue(ClockQueue *queue, Clock *clock) {
-    if (isFull(queue)) {
-        printf("Queue is full\n");
-        return;
-    } else if (isEmpty(queue)) {
-        queue->front = 0;
-        queue->rear = 0;
-    } else {
-        queue->rear = (queue->rear + 1) % MAX_QUEUE_SIZE;
-    }
-    queue->data[queue->rear] = *clock;
-}
-
-// Função para remover um relógio da fila
-Clock dequeue(ClockQueue *queue) {
-    Clock emptyClock = {{0, 0, 0}};
-    if (isEmpty(queue)) {
-        printf("Queue is empty\n");
-        return emptyClock;
-    } else if (queue->front == queue->rear) {
-        Clock item = queue->data[queue->front];
-        queue->front = -1;
-        queue->rear = -1;
-        return item;
-    } else {
-        Clock item = queue->data[queue->front];
-        queue->front = (queue->front + 1) % MAX_QUEUE_SIZE;
-        return item;
-    }
 }
 
 // Função para representar o processo de rank 0
