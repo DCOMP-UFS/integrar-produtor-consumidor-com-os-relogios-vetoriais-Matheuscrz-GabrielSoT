@@ -4,82 +4,82 @@
 
 #define MAX_QUEUE_SIZE 100
 
-// Estrutura para representar o relÛgio de um processo
+// Estrutura para representar o rel√≥gio de um processo
 typedef struct Clock {
-    int p[3]; // Array de inteiros para os relÛgios dos processos
+    int p[3]; // Array de inteiros para os rel√≥gios dos processos
 } Clock;
 
-// Estrutura para representar a fila FIFO de relÛgios recebidos
+// Estrutura para representar a fila FIFO de rel√≥gios recebidos
 typedef struct {
-    Clock data[MAX_QUEUE_SIZE]; // Array para armazenar os relÛgios
-    int front, rear; // Õndices de frente e tr·s da fila
+    Clock data[MAX_QUEUE_SIZE]; // Array para armazenar os rel√≥gios
+    int front, rear; // √çndices de frente e tr√°s da fila
 } ClockQueue;
 
-// ProtÛtipos das funÁıes
+// Prot√≥tipos das fun√ß√µes
 void enqueue(ClockQueue *queue, Clock *clock);
 int isEmpty(ClockQueue *queue);
 Clock dequeue(ClockQueue *queue);
 
-// FunÁ„o para incrementar o relÛgio de um processo apÛs um evento
+// Fun√ß√£o para incrementar o rel√≥gio de um processo ap√≥s um evento
 void Event(int pid, Clock *clock){
     clock->p[pid]++;
 }
 
-// FunÁ„o para enviar um relÛgio para um processo destino
+// Fun√ß√£o para enviar um rel√≥gio para um processo destino
 void Send(int pid, Clock *clock, int dest, ClockQueue *queue){
-    clock->p[pid]++; // Incrementa o relÛgio do processo emissor
+    clock->p[pid]++; // Incrementa o rel√≥gio do processo emissor
 
-    // Se uma fila for fornecida, adiciona o relÛgio ‡ fila
+    // Se uma fila for fornecida, adiciona o rel√≥gio √† fila
     if (queue != NULL) {
         enqueue(queue, clock);
     }
 
-    // Envia o relÛgio para o processo destino usando MPI_Send
+    // Envia o rel√≥gio para o processo destino usando MPI_Send
     MPI_Send(clock, 3, MPI_INT, dest, 0, MPI_COMM_WORLD);
     printf("Processo %d enviou para o processo %d: Clock(%d, %d, %d)\n", pid, dest, clock->p[0], clock->p[1], clock->p[2]);
 }
 
-// FunÁ„o para receber um relÛgio de um processo origem
+// Fun√ß√£o para receber um rel√≥gio de um processo origem
 void Receive(int pid, Clock *clock, int source, ClockQueue *queue){
-    // Se uma fila for fornecida e n„o estiver vazia, retira um relÛgio da fila
+    // Se uma fila for fornecida e n√£o estiver vazia, retira um rel√≥gio da fila
     if (queue != NULL && !isEmpty(queue)) {
         *clock = dequeue(queue);
     }
 
-    // Recebe o novo relÛgio do processo origem usando MPI_Recv
+    // Recebe o novo rel√≥gio do processo origem usando MPI_Recv
     Clock received;
     MPI_Recv(&received, 3, MPI_INT, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-    // Atualiza o relÛgio local com base no relÛgio recebido
+    // Atualiza o rel√≥gio local com base no rel√≥gio recebido
     for(int i = 0; i < 3; i++){
         if(received.p[i] > clock->p[i]){
             clock->p[i] = received.p[i];
         }
     }
 
-    // Incrementa o relÛgio local do processo receptor
+    // Incrementa o rel√≥gio local do processo receptor
     clock->p[pid]++;
 
     printf("Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, source, clock->p[0], clock->p[1], clock->p[2]);
 }
 
-// FunÁ„o para inicializar a fila
+// Fun√ß√£o para inicializar a fila
 void initQueue(ClockQueue *queue) {
     queue->front = -1;
     queue->rear = -1;
 }
 
-// FunÁ„o para verificar se a fila est· vazia
+// Fun√ß√£o para verificar se a fila est√° vazia
 int isEmpty(ClockQueue *queue) {
     return (queue->front == -1 && queue->rear == -1);
 }
 
-// FunÁ„o para verificar se a fila est· cheia
+// Fun√ß√£o para verificar se a fila est√° cheia
 int isFull(ClockQueue *queue) {
     return ((queue->rear + 1) % MAX_QUEUE_SIZE == queue->front);
 }
 
-// FunÁ„o para adicionar um relÛgio ‡ fila
+// Fun√ß√£o para adicionar um rel√≥gio √† fila
 void enqueue(ClockQueue *queue, Clock *clock) {
     if (isFull(queue)) {
         printf("Queue is full\n");
@@ -93,7 +93,7 @@ void enqueue(ClockQueue *queue, Clock *clock) {
     queue->data[queue->rear] = *clock;
 }
 
-// FunÁ„o para remover um relÛgio da fila
+// Fun√ß√£o para remover um rel√≥gio da fila
 Clock dequeue(ClockQueue *queue) {
     Clock emptyClock = {{0, 0, 0}};
     if (isEmpty(queue)) {
@@ -111,13 +111,13 @@ Clock dequeue(ClockQueue *queue) {
     }
 }
 
-// FunÁ„o para representar o processo de rank 0
+// Fun√ß√£o para representar o processo de rank 0
 void process0(){
-    Clock clock = {{0,0,0}}; // Inicializa o relÛgio do processo 0
-    Event(0, &clock); // Atualiza o relÛgio apÛs um evento
+    Clock clock = {{0,0,0}}; // Inicializa o rel√≥gio do processo 0
+    Event(0, &clock); // Atualiza o rel√≥gio ap√≥s um evento
     printf("Processo: %d, Clock: (%d, %d, %d)\n", 0, clock.p[0], clock.p[1], clock.p[2]);
 
-    ClockQueue queue; // Inicializa a fila de relÛgios recebidos
+    ClockQueue queue; // Inicializa a fila de rel√≥gios recebidos
     initQueue(&queue);
 
     // Envia e recebe mensagens para outros processos
@@ -129,14 +129,14 @@ void process0(){
 
     Send(0, &clock, 1, &queue); // Envia novamente para processo 1
 
-    Event(0, &clock); // Atualiza o relÛgio apÛs outro evento
+    Event(0, &clock); // Atualiza o rel√≥gio ap√≥s outro evento
 
     printf("Processo %d, Clock troca com o processo 1: (%d, %d, %d)\n", 0, clock.p[0], clock.p[1], clock.p[2]);
 }
 
-// FunÁ„o para representar o processo de rank 1
+// Fun√ß√£o para representar o processo de rank 1
 void process1(){
-    Clock clock = {{0,0,0}}; // Inicializa o relÛgio do processo 1
+    Clock clock = {{0,0,0}}; // Inicializa o rel√≥gio do processo 1
     printf("Processo: %d, Clock: (%d, %d, %d)\n", 1, clock.p[0], clock.p[1], clock.p[2]);
     Send(1, &clock, 0, NULL); // Envia para processo 0
     Receive(1, &clock, 0, NULL); // Recebe de processo 0
@@ -144,23 +144,23 @@ void process1(){
     Receive(1, &clock, 0, NULL); // Recebe novamente de processo 0
 }
 
-// FunÁ„o para representar o processo de rank 2
+// Fun√ß√£o para representar o processo de rank 2
 void process2(){
-    Clock clock = {{0,0,0}}; // Inicializa o relÛgio do processo 2
-    Event(2, &clock); // Atualiza o relÛgio apÛs um evento
+    Clock clock = {{0,0,0}}; // Inicializa o rel√≥gio do processo 2
+    Event(2, &clock); // Atualiza o rel√≥gio ap√≥s um evento
     printf("Processo: %d, Clock: (%d, %d, %d)\n", 2, clock.p[0], clock.p[1], clock.p[2]);
     Send(2, &clock, 0, NULL); // Envia para processo 0
     Receive(2, &clock, 0, NULL); // Recebe de processo 0
 }
 
-// FunÁ„o principal
+// Fun√ß√£o principal
 int main(void) {
     int my_rank;
 
     MPI_Init(NULL, NULL); // Inicializa o ambiente MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank); // ObtÈm o rank do processo
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank); // Obt√©m o rank do processo
 
-    // Chama a funÁ„o correspondente ao processo com base no seu rank
+    // Chama a fun√ß√£o correspondente ao processo com base no seu rank
     if (my_rank == 0) {
         process0();
     } else if (my_rank == 1) {
