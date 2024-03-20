@@ -1,229 +1,204 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <mpi.h>
 #include <pthread.h>
-#include <unistd.h>
-#include <omp.h>
+#include <mpi.h>
 
-#define MAX_QUEUE 3
-#define CLOCK_SIZE 3
-#define MESSAGE_SIZE 100
+#define MAX_QUEUE_SIZE 5 // Tamanho máximo da fila de relógios
 
+// Estrutura para representar o relógio de um processo
 typedef struct Clock {
-    int p[CLOCK_SIZE];
+    int p[3]; // Array de inteiros para os relógios dos processos
 } Clock;
 
-typedef enum {
-    EVENT,
-    SEND,
-    RECEIVE
-} MessageType;
+// Estrutura para representar um buffer de produtor/consumidor
+typedef struct {
+    Clock data[MAX_QUEUE_SIZE]; // Array para armazenar os relógios
+    int front, rear; // Índices de frente e trás da fila
+    pthread_mutex_t mutex; // Mutex para controle de acesso ao buffer
+    pthread_cond_t empty, full; // Variáveis de condição para sincronização
+} ClockQueue;
 
-typedef struct QueueItem {
-    int pid;
-    int target;
-    MessageType type;
-    char message[MESSAGE_SIZE];
-} QueueItem;
+// Protótipos das funções
+void enqueue(ClockQueue *queue, Clock *clock);
+Clock dequeue(ClockQueue *queue);
 
-typedef struct Queue {
-    QueueItem items[MAX_QUEUE];
-    int front, rear, size;
-    pthread_mutex_t lock;
-    pthread_cond_t notFull, notEmpty;
-} Queue;
-
-Queue input_queue;
-Queue output_queue;
-
-void initQueue(Queue *q) {
-    q->front = 0;
-    q->rear = 0;
-    q->size = 0;
-    pthread_mutex_init(&q->lock, NULL);
-    pthread_cond_init(&q->notFull, NULL);
-    pthread_cond_init(&q->notEmpty, NULL);
+// Função para inicializar a fila
+void initQueue(ClockQueue *queue) {
+    queue->front = -1;
+    queue->rear = -1;
+    pthread_mutex_init(&queue->mutex, NULL);
+    pthread_cond_init(&queue->empty, NULL);
+    pthread_cond_init(&queue->full, NULL);
 }
 
-void enqueue(Queue *q, QueueItem item) {
-    pthread_mutex_lock(&q->lock);
-    while (q->size == MAX_QUEUE) {
-        pthread_cond_wait(&q->notFull, &q->lock);
+// Função para verificar se a fila está vazia
+int isEmpty(ClockQueue *queue) {
+    return (queue->front == -1 && queue->rear == -1);
+}
+
+// Função para verificar se a fila está cheia
+int isFull(ClockQueue *queue) {
+    return ((queue->rear + 1) % MAX_QUEUE_SIZE == queue->front);
+}
+
+// Função para adicionar um relógio à fila
+void enqueue(ClockQueue *queue, Clock *clock) {
+    pthread_mutex_lock(&queue->mutex); // Bloqueia o acesso ao buffer com o mutex
+
+    // Aguarda até que haja espaço disponível no buffer
+    while (isFull(queue)) {
+        pthread_cond_wait(&queue->full, &queue->mutex);
     }
-    q->items[q->rear] = item;
-    q->rear = (q->rear + 1) % MAX_QUEUE;
-    q->size++;
-    pthread_cond_signal(&q->notEmpty);
-    pthread_mutex_unlock(&q->lock);
-}
 
-QueueItem dequeue(Queue *q) {
-    pthread_mutex_lock(&q->lock);
-    while (q->size == 0) {
-        pthread_cond_wait(&q->notEmpty, &q->lock);
+    // Insere o relógio no buffer
+    if (isEmpty(queue)) {
+        queue->front = 0;
+        queue->rear = 0;
+    } else {
+        queue->rear = (queue->rear + 1) % MAX_QUEUE_SIZE;
     }
-    QueueItem item = q->items[q->front];
-    q->front = (q->front + 1) % MAX_QUEUE;
-    q->size--;
-    pthread_cond_signal(&q->notFull);
-    pthread_mutex_unlock(&q->lock);
-    return item;
+    queue->data[queue->rear] = *clock;
+
+    // Sinaliza que o buffer não está mais vazio e está cheio
+    pthread_cond_signal(&queue->empty);
+    pthread_cond_signal(&queue->full);
+
+    pthread_mutex_unlock(&queue->mutex); // Libera o acesso ao buffer
 }
 
-char* Increment(int pid, Clock *clock) {
+// Função para remover um relógio da fila
+Clock dequeue(ClockQueue *queue) {
+    pthread_mutex_lock(&queue->mutex); // Bloqueia o acesso ao buffer com o mutex
+
+    // Aguarda até que haja um item disponível no buffer
+    while (isEmpty(queue)) {
+        pthread_cond_wait(&queue->empty, &queue->mutex);
+    }
+
+    // Remove o relógio do buffer
+    Clock emptyClock = {{0, 0, 0}};
+    if (queue->front == queue->rear) {
+        Clock item = queue->data[queue->front];
+        queue->front = -1;
+        queue->rear = -1;
+        pthread_cond_signal(&queue->full); // Sinaliza que o buffer não está mais cheio
+        pthread_mutex_unlock(&queue->mutex); // Libera o acesso ao buffer
+        return item;
+    } else {
+        Clock item = queue->data[queue->front];
+        queue->front = (queue->front + 1) % MAX_QUEUE_SIZE;
+
+        // Sinaliza que o buffer não está mais cheio
+        pthread_cond_signal(&queue->full);
+        pthread_mutex_unlock(&queue->mutex); // Libera o acesso ao buffer
+        return item;
+    }
+}
+
+// Função para incrementar o relógio de um processo após um evento
+void Event(int pid, Clock *clock){
     clock->p[pid]++;
-    char* message = malloc(MESSAGE_SIZE * sizeof(char));
-    sprintf(message, "Processo %d: Clock(%d, %d, %d)\n", pid, clock->p[0], clock->p[1], clock->p[2]);
-    return message;
 }
 
-void updateClock(Clock *clock, Clock *received) {
-    for (int i = 0; i < CLOCK_SIZE; i++) {
-        if (received->p[i] > clock->p[i]) {
-            clock->p[i] = received->p[i];
-        }
+// Função para enviar um relógio para um processo destino
+void Send(int pid, Clock *clock, int dest, ClockQueue *queue){
+    clock->p[pid]++; // Incrementa o relógio do processo emissor
+
+    // Se uma fila for fornecida, adiciona o relógio à fila
+    if (queue != NULL) {
+        enqueue(queue, clock);
+        printf("Processo %d: Enviou para a fila de saída. Itens na fila de saída: %d\n", pid, (queue->rear - queue->front + MAX_QUEUE_SIZE) % MAX_QUEUE_SIZE + 1);
     }
+
+    // Envia o relógio para o processo destino usando MPI_Send
+    MPI_Send(clock, 3, MPI_INT, dest, 0, MPI_COMM_WORLD);
+    printf("Processo %d enviou para o processo %d: Clock(%d, %d, %d)\n", pid, dest, clock->p[0], clock->p[1], clock->p[2]);
 }
 
-char* Send_MPI(int pid, Clock *clock, int dest){
-    clock->p[pid]++;
-    int error = MPI_Send(clock, sizeof(Clock), MPI_BYTE, dest, 0, MPI_COMM_WORLD);
-    if (error != MPI_SUCCESS) {
-        fprintf(stderr, "Falha ao enviar mensagem MPI\n");
-        MPI_Abort(MPI_COMM_WORLD, error);
+// Função para receber um relógio de um processo origem
+void Receive(int pid, Clock *clock, int source, ClockQueue *queue){
+    // Se uma fila for fornecida e não estiver vazia, retira um relógio da fila
+    if (queue != NULL && !isEmpty(queue)) {
+        *clock = dequeue(queue);
+        printf("Processo %d: Recebeu da fila de entrada. Itens na fila de entrada: %d\n", pid, (queue->rear - queue->front + MAX_QUEUE_SIZE) % MAX_QUEUE_SIZE);
     }
-    char* message = malloc(MESSAGE_SIZE * sizeof(char));
-    sprintf(message, "Processo %d enviou para o processo %d: Clock(%d, %d, %d)\n", pid, dest, clock->p[0], clock->p[1], clock->p[2]);
-    return message;
-}
 
-char* Recv_MPI(int pid, Clock *clock, int source){
+    // Recebe o novo relógio do processo origem usando MPI_Recv
     Clock received;
-    int error = MPI_Recv(&received, sizeof(Clock), MPI_BYTE, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-    if (error != MPI_SUCCESS) {
-        fprintf(stderr, "Falha ao receber mensagem MPI\n");
-        MPI_Abort(MPI_COMM_WORLD, error);
-    }
-    updateClock(clock, &received);
-    char* message = malloc(MESSAGE_SIZE * sizeof(char));
-    sprintf(message, "Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, source, received.p[0], received.p[1], received.p[2]);
-    return message;
-}
+    MPI_Recv(&received, 3, MPI_INT, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-void* processThread(void *arg) {
-    Clock clock = {{0, 0, 0}};
-    while(1){
-        QueueItem item = dequeue(&input_queue);
-        if(item.type == EVENT){
-            char* message = Increment(item.pid, &clock);
-            strcpy(item.message, message);
-            free(message);
-        } else if(item.type == SEND){
-            char* message = Send_MPI(item.pid, &clock, item.target);
-            strcpy(item.message, message);
-            free(message);
-        } else if(item.type == RECEIVE){
-            char* message = Recv_MPI(item.pid, &clock, item.target);
-            strcpy(item.message, message);
-            free(message);
-        }
-        enqueue(&output_queue, item);
-        if (input_queue.size == 0 && item.type != EVENT) {
-            break;
+    // Atualiza o relógio local com base no relógio recebido
+    for(int i = 0; i < 3; i++){
+        if(received.p[i] > clock->p[i]){
+            clock->p[i] = received.p[i];
         }
     }
-    return NULL;
+
+    // Incrementa o relógio local do processo receptor
+    clock->p[pid]++;
+
+    printf("Processo %d recebeu do processo %d: Clock(%d, %d, %d)\n", pid, source, clock->p[0], clock->p[1], clock->p[2]);
 }
 
-void* outputThread(void *arg) {
-    while(1) {
-        QueueItem item = dequeue(&output_queue);
-        if(item.message != NULL){
-            printf("%s", item.message);
-        } else {
-            break;
-        }
-    }
-    return NULL;
-}
-
-void Event(int pid){
-    MessageType type = EVENT;
-    QueueItem item;
-    item.pid = pid;
-    item.type = type;
-    enqueue(&input_queue, item);
-}
-
-void Send(int pid, int dest){
-    MessageType type = SEND;
-    QueueItem item;
-    item.pid = pid;
-    item.type = type;
-    item.target = dest;
-    enqueue(&input_queue, item);
-}
-
-void Receive(int pid, int source){
-    MessageType type = RECEIVE;
-    QueueItem item;
-    item.pid = pid;
-    item.type = type;
-    item.target = source;
-    enqueue(&input_queue, item);
-}
-
+// Função para representar o processo de rank 0
 void process0(){
-    Event(0);
-    Send(0, 1);
-    Receive(0, 1);
-    Send(0, 2);
-    Receive(0, 2);
-    Send(0, 1);
-    Event(0);
+    Clock clock = {{0,0,0}}; // Inicializa o relógio do processo 0
+    Event(0, &clock); // Atualiza o relógio após um evento
+    printf("Processo: %d, Clock: (%d, %d, %d)\n", 0, clock.p[0], clock.p[1], clock.p[2]);
+
+    ClockQueue queue; // Inicializa a fila de relógios recebidos
+    initQueue(&queue);
+
+    // Envia e recebe mensagens para outros processos
+    Send(0, &clock, 1, &queue); // Envia para processo 1
+    Receive(0, &clock, 1, &queue); // Recebe de processo 1
+
+    Send(0, &clock, 2, &queue); // Envia para processo 2
+    Receive(0, &clock, 2, &queue); // Recebe de processo 2
+
+    Send(0, &clock, 1, &queue); // Envia novamente para processo 1
+
+    Event(0, &clock); // Atualiza o relógio após outro evento
+
+    printf("Processo %d, Clock troca com o processo 1: (%d, %d, %d)\n", 0, clock.p[0], clock.p[1], clock.p[2]);
 }
 
+// Função para representar o processo de rank 1
 void process1(){
-    Send(1, 0);
-    Receive(1, 0);
-    Receive(1, 0);
+    Clock clock = {{0,0,0}}; // Inicializa o relógio do processo 1
+    printf("Processo: %d, Clock: (%d, %d, %d)\n", 1, clock.p[0], clock.p[1], clock.p[2]);
+    Send(1, &clock, 0, NULL); // Envia para processo 0
+    Receive(1, &clock, 0, NULL); // Recebe de processo 0
+
+    Receive(1, &clock, 0, NULL); // Recebe novamente de processo 0
 }
 
+// Função para representar o processo de rank 2
 void process2(){
-    Event(2);
-    Send(2, 0);
-    Receive(2, 0);
+    Clock clock = {{0,0,0}}; // Inicializa o relógio do processo 2
+    Event(2, &clock); // Atualiza o relógio após um evento
+    printf("Processo: %d, Clock: (%d, %d, %d)\n", 2, clock.p[0], clock.p[1], clock.p[2]);
+    Send(2, &clock, 0, NULL); // Envia para processo 0
+    Receive(2, &clock, 0, NULL); // Recebe de processo 0
 }
 
-int main() {
+// Função principal
+int main(void) {
     int my_rank;
-    int error = MPI_Init(NULL, NULL);
-    if (error != MPI_SUCCESS) {
-        fprintf(stderr, "Falha ao inicializar MPI\n");
-        MPI_Abort(MPI_COMM_WORLD, error);
-    }
-    error = MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-    if (error != MPI_SUCCESS) {
-        fprintf(stderr, "Falha ao obter o rank MPI\n");
-        MPI_Abort(MPI_COMM_WORLD, error);
-    }
 
-    initQueue(&input_queue);
-    initQueue(&output_queue);
-    pthread_t process, output;
-    pthread_create(&process, NULL, processThread, NULL);
-    pthread_create(&output, NULL, outputThread, NULL);
+    MPI_Init(NULL, NULL); // Inicializa o ambiente MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank); // Obtém o rank do processo
 
-    if(my_rank == 0){
+    // Chama a função correspondente ao processo com base no seu rank
+    if (my_rank == 0) {
         process0();
-    } else if(my_rank == 1){
+    } else if (my_rank == 1) {
         process1();
-    } else if(my_rank == 2){
+    } else if (my_rank == 2) {
         process2();
     }
-    pthread_join(process, NULL);
-    pthread_join(output, NULL);
-    MPI_Finalize();
+
+    MPI_Finalize(); // Finaliza o ambiente MPI
+
     return 0;
 }
