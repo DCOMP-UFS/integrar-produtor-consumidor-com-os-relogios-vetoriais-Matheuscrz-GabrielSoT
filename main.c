@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdlib.h>
 #include <string.h>
 #include <pthread.h> 
 #include <mpi.h>     
@@ -190,33 +189,7 @@ void process0(){
     }
 }
 
-    // Processo de rank 0
-    pthread_t thread[THREAD_NUM];
-    pthread_create(&thread[0], NULL, &MainThread, (void*) 0);
-    pthread_create(&thread[1], NULL, &SendThread, (void*) 0);
-    pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 0);
-
-    for (int i = 0; i < THREAD_NUM; i++){  
-        if (pthread_join(thread[i], NULL) != 0) {
-            perror("Falha ao juntar a thread");
-        }
-    }
-}
-
 void process1(){
-    // Processo de rank 1
-    pthread_t thread[THREAD_NUM];
-    pthread_create(&thread[0], NULL, &MainThread, (void*) 1);
-    pthread_create(&thread[1], NULL, &SendThread, (void*) 1);
-    pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 1);
-    
-    for (int i = 0; i < THREAD_NUM; i++){  
-        if (pthread_join(thread[i], NULL) != 0) {
-            perror("Falha ao juntar a thread");
-        }
-    }
-}
-
     // Processo de rank 1
     pthread_t thread[THREAD_NUM];
     pthread_create(&thread[0], NULL, &MainThread, (void*) 1);
@@ -265,9 +238,7 @@ int main() {
     if (my_rank == 0) { 
         process0();
     } else if (my_rank == 1) {  
-    } else if (my_rank == 1) {  
         process1();
-    } else if (my_rank == 2) {  
     } else if (my_rank == 2) {  
         process2();
     }
